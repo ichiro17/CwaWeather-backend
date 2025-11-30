@@ -2,7 +2,6 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
-const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,7 +14,7 @@ const CWA_API_KEY = process.env.CWA_API_KEY;
 const CACHE_DURATION = 30 * 60 * 1000; // 30 分鐘
 const weatherCache = new Map();
 
-// 定義支援的城市與對應中文名稱
+// 定義支援的城市與對應的中文名稱 (六都)
 const CITY_MAP = {
   tainan: "臺南市",
   kaohsiung: "高雄市",
@@ -25,7 +24,7 @@ const CITY_MAP = {
   newtaipei: "新北市",
 };
 
-// CORS 設定
+// Middleware - 改進的 CORS 設定
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
   ? process.env.ALLOWED_ORIGINS.split(',') 
   : '*';
@@ -36,8 +35,16 @@ app.use(cors({
   credentials: true
 }));
 
+// 壓縮中間件
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// 靜態檔案服務 - 啟用快取
+app.use(express.static('public', {
+  maxAge: '1d',
+  etag: true,
+  lastModified: true
+}));
 
 // 日誌中間件
 app.use((req, res, next) => {
@@ -45,7 +52,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// 快取功能
+// 快取管理功能
 function getCachedWeather(cityKey) {
   const cached = weatherCache.get(cityKey);
   if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
@@ -61,81 +68,64 @@ function setCachedWeather(cityKey, data) {
   });
 }
 
-// 天氣 API 主程式
+/**
+ * 取得指定城市天氣預報
+ * CWA 氣象資料開放平臺 API
+ * 使用「一般天氣預報-今明 36 小時天氣預報」資料集
+ */
 const getCityWeather = async (req, res) => {
   const startTime = Date.now();
-
+  
   try {
     const { city } = req.params;
-    console.log(`🔍 請求城市: ${city}`);
     
+    // 驗證城市是否在支援列表中 (轉小寫比對)
     const locationName = CITY_MAP[city.toLowerCase()];
 
     if (!locationName) {
-      console.log(`❌ 不支援的城市: ${city}`);
       return res.status(400).json({
         success: false,
         error: "不支援的城市",
-        message: `有效城市代碼: ${Object.keys(CITY_MAP).join(", ")}`
+        message: `請輸入有效的城市代碼: ${Object.keys(CITY_MAP).join(", ")}`,
       });
     }
 
-    console.log(`📍 查詢城市: ${locationName} (${city})`);
-
-    // 檢查快取
-    const cached = getCachedWeather(city.toLowerCase());
-    if (cached) {
-      console.log(`✅ 從快取返回 ${locationName} 天氣資料`);
-      return res.json({ success: true, data: cached, cached: true });
-    }
-
-    // API Key 檢查
+    // 檢查是否有設定 API Key
     if (!CWA_API_KEY) {
-      console.error("❌ 缺少 CWA_API_KEY");
+      console.error("[ERROR] CWA_API_KEY 未設定");
       return res.status(500).json({
         success: false,
-        message: "伺服器設定錯誤,缺少 CWA_API_KEY",
-        hint: "請在 .env 檔案中設定 CWA_API_KEY"
+        error: "伺服器設定錯誤",
+        message: "請在 .env 檔案中設定 CWA_API_KEY",
       });
     }
 
-    console.log(`🌐 呼叫 CWA API: ${locationName}`);
-
+    // 呼叫 CWA API
     const response = await axios.get(
       `${CWA_API_BASE_URL}/v1/rest/datastore/F-C0032-001`,
       {
-        headers: { 'Authorization': CWA_API_KEY },
-        params: { locationName },
-        timeout: 10000,
+        headers: {
+          'Authorization': CWA_API_KEY,
+        },
+        params: {
+          locationName: locationName,
+        },
+        timeout: 8000,
       }
     );
 
-    console.log(`✅ CWA API 回應成功 (狀態碼: ${response.status})`);
-
-    // 檢查回應結構
-    if (!response.data || !response.data.records || !response.data.records.location) {
-      console.error("❌ CWA API 回應格式異常:", JSON.stringify(response.data).substring(0, 200));
-      return res.status(500).json({
-        success: false,
-        message: "CWA API 回應格式異常",
-        detail: "無法解析 location 資料"
-      });
-    }
-
+    // 取得該城市的天氣資料
     const locationData = response.data.records.location[0];
 
     if (!locationData) {
-      console.error(`❌ 查無 ${locationName} 天氣資料`);
       return res.status(404).json({
         success: false,
-        message: `查無 ${locationName} 天氣資料`
+        error: "查無資料",
+        message: `無法取得 ${locationName} 天氣資料`,
       });
     }
 
-    console.log(`📊 開始處理 ${locationName} 的天氣資料...`);
-
-    const weatherElements = locationData.weatherElement;
-
+    // 整理天氣資料
     const weatherData = {
       city: locationData.locationName,
       cityKey: city.toLowerCase(),
@@ -143,9 +133,11 @@ const getCityWeather = async (req, res) => {
       forecasts: [],
     };
 
-    const count = weatherElements[0].time.length;
+    // 解析天氣要素
+    const weatherElements = locationData.weatherElement;
+    const timeCount = weatherElements[0].time.length;
 
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < timeCount; i++) {
       const forecast = {
         startTime: weatherElements[0].time[i].startTime,
         endTime: weatherElements[0].time[i].endTime,
@@ -162,7 +154,6 @@ const getCityWeather = async (req, res) => {
         if (!timeData) return;
 
         const value = timeData.parameter;
-
         switch (element.elementName) {
           case "Wx":
             forecast.weather = value.parameterName;
@@ -188,155 +179,104 @@ const getCityWeather = async (req, res) => {
       weatherData.forecasts.push(forecast);
     }
 
-    // 儲存到快取
-    setCachedWeather(city.toLowerCase(), weatherData);
+    const duration = Date.now() - startTime;
+    console.log(`[SUCCESS] ${city} 天氣資料取得成功 (${duration}ms)`);
 
-    console.log(`✅ 成功取得 ${locationName} 天氣資料 (耗時 ${Date.now() - startTime}ms)`);
-    res.json({ success: true, data: weatherData });
-
+    res.json({
+      success: true,
+      data: weatherData,
+    });
   } catch (error) {
-    console.error("❌ 取得天氣失敗:");
-    console.error("錯誤訊息:", error.message);
-    console.error("錯誤代碼:", error.code);
+    const duration = Date.now() - startTime;
     
-    if (error.response) {
-      console.error("API 回應狀態:", error.response.status);
-      console.error("API 回應內容:", JSON.stringify(error.response.data).substring(0, 500));
-    }
+    // 詳細的錯誤日誌
+    console.error("[ERROR] 取得天氣資料失敗:", {
+      city: req.params.city,
+      error: error.message,
+      code: error.code,
+      status: error.response?.status,
+      duration: `${duration}ms`,
+      timestamp: new Date().toISOString(),
+    });
 
-    if (error.code === "ECONNABORTED") {
+    // 根據錯誤類型返回適當的狀態碼
+    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
       return res.status(504).json({
         success: false,
-        message: "CWA API 回應超時",
-        detail: "請稍後再試"
+        error: "請求超時",
+        message: "CWA API 回應時間過長，請稍後再試",
       });
     }
 
-    if (error.response && error.response.status === 401) {
-      return res.status(500).json({
+    if (error.response) {
+      return res.status(error.response.status).json({
         success: false,
-        message: "API 授權失敗",
-        detail: "請檢查 CWA_API_KEY 是否正確"
-      });
-    }
-
-    if (error.response && error.response.status === 429) {
-      return res.status(429).json({
-        success: false,
-        message: "API 呼叫次數超過限制",
-        detail: "請稍後再試"
+        error: "CWA API 錯誤",
+        message: error.response.data.message || "無法取得天氣資料",
+        details: error.response.data,
       });
     }
 
     res.status(500).json({
       success: false,
-      message: "伺服器內部錯誤",
-      detail: process.env.NODE_ENV === 'production' ? undefined : error.message,
-      errorCode: error.code
+      error: "伺服器錯誤",
+      message: "無法取得天氣資料，請稍後再試",
     });
   }
 };
 
-// API 路由
-app.get("/api/weather/:city", getCityWeather);
-
-// 測試端點 - 檢查設定
-app.get("/api/debug", (req, res) => {
-  res.json({
-    status: "debug_info",
-    environment: {
-      node_env: process.env.NODE_ENV || 'development',
-      has_api_key: !!CWA_API_KEY,
-      api_key_length: CWA_API_KEY ? CWA_API_KEY.length : 0,
-      api_base_url: CWA_API_BASE_URL,
-    },
-    supported_cities: CITY_MAP,
-    cache: {
-      size: weatherCache.size,
-      keys: Array.from(weatherCache.keys())
-    },
-    uptime: process.uptime()
-  });
+// Routes
+app.get("/", (req, res) => {
+  res.sendFile(__dirname + '/public/index.html');
 });
 
 app.get("/api/health", (req, res) => {
-  res.json({
-    status: "OK",
-    uptime: process.uptime(),
+  res.json({ 
+    status: "OK", 
     timestamp: new Date().toISOString(),
-    cache_size: weatherCache.size
+    uptime: process.uptime(),
   });
 });
 
-// API 資訊端點
-app.get("/api", (req, res) => {
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
-  res.json({
-    message: "歡迎使用 CWA 天氣預報 API",
-    version: "1.0.0",
-    endpoints: {
-      health: `${baseUrl}/api/health`,
-      tainan: `${baseUrl}/api/weather/tainan`,
-      kaohsiung: `${baseUrl}/api/weather/kaohsiung`,
-      taichung: `${baseUrl}/api/weather/taichung`,
-      taipei: `${baseUrl}/api/weather/taipei`,
-      taoyuan: `${baseUrl}/api/weather/taoyuan`,
-      newtaipei: `${baseUrl}/api/weather/newtaipei`,
-    },
-    supported_cities: Object.keys(CITY_MAP),
-    usage: `GET ${baseUrl}/api/weather/{city}`
+// 設定動態路由，:city 代表變數
+app.get("/api/weather/:city", getCityWeather);
+
+// Error handling
+app.use((err, req, res, next) => {
+  console.error("[ERROR] 未處理的錯誤:", {
+    message: err.message,
+    stack: err.stack,
+    timestamp: new Date().toISOString(),
+  });
+  
+  res.status(500).json({
+    success: false,
+    error: "伺服器錯誤",
+    message: err.message,
   });
 });
 
-// 根路徑 - 根據 Accept header 決定返回內容
-app.get("/", (req, res) => {
-  const acceptHeader = req.get('Accept') || '';
-  
-  // 如果請求 JSON 格式,返回 API 資訊
-  if (acceptHeader.includes('application/json')) {
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    return res.json({
-      message: "歡迎使用 CWA 天氣預報 API",
-      version: "1.0.0",
-      endpoints: {
-        api_info: `${baseUrl}/api`,
-        health: `${baseUrl}/api/health`,
-        weather: `${baseUrl}/api/weather/{city}`,
-      },
-      supported_cities: Object.keys(CITY_MAP),
-      web_interface: baseUrl
-    });
-  }
-  
-  // 否則返回 HTML 頁面
-  res.sendFile(path.join(process.cwd(), "index.html"));
-});
-
-// 404
+// 404 handler
 app.use((req, res) => {
   res.status(404).json({
     success: false,
-    message: "路徑不存在",
+    error: "找不到此路徑",
     path: req.path,
-    available_endpoints: ["/", "/api", "/api/health", "/api/weather/:city"]
   });
 });
 
-// 錯誤處理中間件
-app.use((err, req, res, next) => {
-  console.error("伺服器錯誤:", err);
-  res.status(500).json({
-    success: false,
-    message: "伺服器內部錯誤",
-    error: process.env.NODE_ENV === 'development' ? err.message : undefined
+// 優雅關閉
+process.on('SIGTERM', () => {
+  console.log('收到 SIGTERM 信號,正在關閉伺服器...');
+  server.close(() => {
+    console.log('伺服器已關閉');
+    process.exit(0);
   });
 });
 
-// 啟動
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🚀 伺服器運行於 http://localhost:${PORT}`);
-  console.log(`📍 API 端點: http://localhost:${PORT}/api`);
-  console.log(`🏥 健康檢查: http://localhost:${PORT}/api/health`);
-  console.log(`🌤️  天氣查詢: http://localhost:${PORT}/api/weather/{city}`);
-  console.log(`🎯 支援城市: ${Object.keys(CITY_MAP).join(', ')}`);
+  console.log(`📍 支援城市: ${Object.keys(CITY_MAP).join(", ")}`);
+  console.log(`📍 環境: ${process.env.NODE_ENV || "development"}`);
+  console.log(`📍 CORS 允許來源: ${allowedOrigins === '*' ? '所有來源' : allowedOrigins}`);
 });
