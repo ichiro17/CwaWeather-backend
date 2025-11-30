@@ -10,6 +10,10 @@ const PORT = process.env.PORT || 3000;
 const CWA_API_BASE_URL = "https://opendata.cwa.gov.tw/api";
 const CWA_API_KEY = process.env.CWA_API_KEY;
 
+// 快取設定
+const CACHE_DURATION = 30 * 60 * 1000; // 30 分鐘
+const weatherCache = new Map();
+
 // 定義支援的城市與對應的中文名稱 (六都)
 const CITY_MAP = {
   tainan: "臺南市",
@@ -31,14 +35,38 @@ app.use(cors({
   credentials: true
 }));
 
+// 壓縮中間件
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// 靜態檔案服務 - 啟用快取
+app.use(express.static('public', {
+  maxAge: '1d',
+  etag: true,
+  lastModified: true
+}));
 
 // 日誌中間件
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
 });
+
+// 快取管理功能
+function getCachedWeather(cityKey) {
+  const cached = weatherCache.get(cityKey);
+  if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+    return cached.data;
+  }
+  return null;
+}
+
+function setCachedWeather(cityKey, data) {
+  weatherCache.set(cityKey, {
+    data,
+    timestamp: Date.now()
+  });
+}
 
 /**
  * 取得指定城市天氣預報
@@ -72,7 +100,7 @@ const getCityWeather = async (req, res) => {
       });
     }
 
-    // 呼叫 CWA API - 修正：將 Authorization 放在 headers
+    // 呼叫 CWA API
     const response = await axios.get(
       `${CWA_API_BASE_URL}/v1/rest/datastore/F-C0032-001`,
       {
@@ -82,7 +110,7 @@ const getCityWeather = async (req, res) => {
         params: {
           locationName: locationName,
         },
-        timeout: 8000, // 8秒超時
+        timeout: 8000,
       }
     );
 
@@ -131,13 +159,13 @@ const getCityWeather = async (req, res) => {
             forecast.weather = value.parameterName;
             break;
           case "PoP":
-            forecast.rain = value.parameterName + "%";
+            forecast.rain = value.parameterName;
             break;
           case "MinT":
-            forecast.minTemp = value.parameterName + "°C";
+            forecast.minTemp = value.parameterName;
             break;
           case "MaxT":
-            forecast.maxTemp = value.parameterName + "°C";
+            forecast.maxTemp = value.parameterName;
             break;
           case "CI":
             forecast.comfort = value.parameterName;
@@ -199,16 +227,7 @@ const getCityWeather = async (req, res) => {
 
 // Routes
 app.get("/", (req, res) => {
-  res.json({
-    message: "歡迎使用 CWA 天氣預報 API",
-    version: "2.0",
-    endpoints: {
-      getWeather: "/api/weather/:city",
-      supportedCities: Object.keys(CITY_MAP),
-      example: "/api/weather/taipei",
-      health: "/api/health",
-    },
-  });
+  res.sendFile(__dirname + '/public/index.html');
 });
 
 app.get("/api/health", (req, res) => {
@@ -248,7 +267,7 @@ app.use((req, res) => {
 
 // 優雅關閉
 process.on('SIGTERM', () => {
-  console.log('收到 SIGTERM 信號，正在關閉伺服器...');
+  console.log('收到 SIGTERM 信號,正在關閉伺服器...');
   server.close(() => {
     console.log('伺服器已關閉');
     process.exit(0);
