@@ -35,16 +35,8 @@ app.use(cors({
   credentials: true
 }));
 
-// 壓縮中間件
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// 靜態檔案服務 - 啟用快取
-app.use(express.static('public', {
-  maxAge: '1d',
-  etag: true,
-  lastModified: true
-}));
 
 // 日誌中間件
 app.use((req, res, next) => {
